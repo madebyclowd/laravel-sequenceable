@@ -12,7 +12,6 @@ abstract class TestCase extends OrchestraTestCase
      * Get package providers.
      *
      * @param  Application  $app
-     * @return array
      */
     protected function getPackageProviders($app): array
     {
@@ -25,7 +24,6 @@ abstract class TestCase extends OrchestraTestCase
      * Define environment setup.
      *
      * @param  Application  $app
-     * @return void
      */
     protected function getEnvironmentSetUp($app): void
     {

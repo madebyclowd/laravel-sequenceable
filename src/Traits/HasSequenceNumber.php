@@ -4,6 +4,7 @@ namespace MadeByClowd\Sequenceable\Traits;
 
 use Illuminate\Database\Eloquent\Model;
 use MadeByClowd\Sequenceable\Contracts\Sequenceable;
+use MadeByClowd\Sequenceable\Exceptions\SequenceableException;
 use MadeByClowd\Sequenceable\Facades\Sequence;
 
 trait HasSequenceNumber
@@ -14,7 +15,7 @@ trait HasSequenceNumber
     protected static function bootHasSequenceNumber(): void
     {
         static::creating(function (Model $model) {
-            if (!$model instanceof Sequenceable) {
+            if (! $model instanceof Sequenceable) {
                 return;
             }
 
@@ -44,8 +45,51 @@ trait HasSequenceNumber
                         $formatTemplate,
                         $padLength,
                         $scope,
-                        $model
+                        $model,
+                        $config['connection'] ?? null,
+                        (int) ($config['start_value'] ?? 1),
+                        (int) ($config['step'] ?? 1),
+                        (bool) ($config['continuous'] ?? false),
+                        isset($config['max_value']) ? (int) $config['max_value'] : null
                     );
+                } else {
+                    // Enforce manual override protection
+                    $allowManual = (bool) ($config['allow_manual'] ?? true);
+                    if (! $allowManual) {
+                        throw new SequenceableException(
+                            "Manual assignment of sequence number on field '{$columnName}' is not allowed."
+                        );
+                    }
+                }
+            }
+        });
+
+        static::deleted(function (Model $model) {
+            if (! $model instanceof Sequenceable) {
+                return;
+            }
+
+            $rawConfigs = $model->getSequenceConfig();
+            $configs = isset($rawConfigs['module']) || isset($rawConfigs['type_code']) || isset($rawConfigs['type_relation'])
+                ? [($rawConfigs['column'] ?? 'number') => $rawConfigs]
+                : $rawConfigs;
+
+            foreach ($configs as $column => $config) {
+                $columnName = is_numeric($column) ? ($config['column'] ?? 'number') : $column;
+                $continuous = (bool) ($config['continuous'] ?? false);
+
+                if ($continuous && ! empty($model->{$columnName})) {
+                    $val = $model->{$columnName};
+                    if (preg_match('/(\d+)(?:\D*)$/', $val, $matches)) {
+                        $number = (int) $matches[1];
+                        $module = $config['module'] ?? $model->getTable();
+                        $typeCode = $model->resolveSequenceTypeCode($config);
+                        $period = $model->resolveSequencePeriod($config);
+                        $scope = $model->resolveSequenceScope($config);
+                        $connection = $config['connection'] ?? null;
+
+                        Sequence::recycle($module, $typeCode, $period, $scope, $number, $connection);
+                    }
                 }
             }
         });

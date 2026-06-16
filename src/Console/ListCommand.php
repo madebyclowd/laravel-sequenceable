@@ -43,6 +43,7 @@ class ListCommand extends Command
 
         if ($sequences->isEmpty()) {
             $this->components->info('No active sequence counters found.');
+
             return self::SUCCESS;
         }
 

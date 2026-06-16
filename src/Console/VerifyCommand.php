@@ -3,6 +3,9 @@
 namespace MadeByClowd\Sequenceable\Console;
 
 use Illuminate\Console\Command;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Schema;
+use MadeByClowd\Sequenceable\Contracts\Sequenceable;
 use MadeByClowd\Sequenceable\Facades\Sequence;
 
 class VerifyCommand extends Command
@@ -39,37 +42,69 @@ class VerifyCommand extends Command
 
         if (! class_exists($modelClass)) {
             $this->components->error("Model class '{$modelClass}' does not exist.");
+
+            return self::FAILURE;
+        }
+
+        if (! is_subclass_of($modelClass, Model::class)) {
+            $this->components->error("Class '{$modelClass}' is not a valid Eloquent Model subclass.");
+
+            return self::FAILURE;
+        }
+
+        if (! is_subclass_of($modelClass, Sequenceable::class)) {
+            $this->components->error("Model class '{$modelClass}' must implement 'MadeByClowd\\Sequenceable\\Contracts\\Sequenceable' interface.");
+
             return self::FAILURE;
         }
 
         $model = new $modelClass;
-        $module = $this->option('module') ?: $model->getTable();
+        $tableName = $model->getTable();
+
+        if (! Schema::hasColumn($tableName, $column)) {
+            $this->components->error("Database table '{$tableName}' does not have a column named '{$column}'.");
+
+            return self::FAILURE;
+        }
+
+        $module = $this->option('module') ?: $tableName;
         $type = $this->option('type');
         $period = $this->option('period') ?: now()->format('Ym');
         $scope = $this->option('scope');
 
         $this->components->info("Scanning '{$modelClass}' records for column '{$column}'...");
 
-        // Fetch all values of this column
-        $values = $modelClass::query()
+        // Fetch values of this column using a memory-safe query builder
+        $query = $modelClass::query()
             ->whereNotNull($column)
-            ->where($column, '<>', '')
-            ->pluck($column);
+            ->where($column, '<>', '');
 
-        if ($values->isEmpty()) {
-            $this->components->info("No records found with sequence values in '{$modelClass}'.");
-            return self::SUCCESS;
+        if ($type) {
+            $query->where($column, 'like', "%{$type}%");
+        }
+        if ($this->option('period')) {
+            $query->where($column, 'like', "%{$period}%");
         }
 
         // Extract numbers from the strings (looks for digits at the end of string or right before non-digits)
         $maxNumber = 0;
-        foreach ($values as $val) {
+        $found = false;
+
+        foreach ($query->lazy(1000) as $record) {
+            $val = $record->{$column};
             if (preg_match('/(\d+)(?:\D*)$/', $val, $matches)) {
                 $num = (int) $matches[1];
                 if ($num > $maxNumber) {
                     $maxNumber = $num;
                 }
+                $found = true;
             }
+        }
+
+        if (! $found) {
+            $this->components->info("No records found with sequence values in '{$modelClass}'.");
+
+            return self::SUCCESS;
         }
 
         $currentDbNumber = Sequence::getCurrent($module, $type, $period, $scope);
@@ -88,7 +123,7 @@ class VerifyCommand extends Command
                 $this->components->warn("Run with '--repair' option to automatically align the database sequence counter.");
             }
         } else {
-            $this->components->info("Sequence is verified and in sync!");
+            $this->components->info('Sequence is verified and in sync!');
         }
 
         return self::SUCCESS;

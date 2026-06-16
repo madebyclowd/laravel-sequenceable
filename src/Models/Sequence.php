@@ -2,6 +2,7 @@
 
 namespace MadeByClowd\Sequenceable\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
@@ -85,8 +86,8 @@ class Sequence extends Model
     /**
      * Override setKeysForSaveQuery to handle composite keys.
      *
-     * @param  \Illuminate\Database\Eloquent\Builder  $query
-     * @return \Illuminate\Database\Eloquent\Builder
+     * @param  Builder  $query
+     * @return Builder
      */
     protected function setKeysForSaveQuery($query)
     {
@@ -110,7 +111,7 @@ class Sequence extends Model
      */
     public function creator(): ?BelongsTo
     {
-        if (!config('sequenceable.audit.enabled', false)) {
+        if (! config('sequenceable.audit.enabled', false)) {
             return null;
         }
 
@@ -125,7 +126,7 @@ class Sequence extends Model
      */
     public function updater(): ?BelongsTo
     {
-        if (!config('sequenceable.audit.enabled', false)) {
+        if (! config('sequenceable.audit.enabled', false)) {
             return null;
         }
 

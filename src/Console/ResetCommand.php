@@ -39,6 +39,7 @@ class ResetCommand extends Command
 
         if (! $this->confirm("Are you sure you want to reset the sequence [{$module}][{$type}][{$period}][{$scope}] to {$value}?", true)) {
             $this->components->info('Reset cancelled.');
+
             return self::SUCCESS;
         }
 

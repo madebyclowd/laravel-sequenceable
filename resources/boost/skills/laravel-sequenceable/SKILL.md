@@ -167,15 +167,66 @@ public function getSequenceConfig(): array
 }
 ```
 
-#### 6. Manual Sequence Facade Generation
+#### 6. Advanced Enterprise Features
 
-To manually query or increment sequences in service classes, jobs, or custom commands:
+For enterprise numbering requirements, the following properties are supported directly within the model sequence configuration:
+
+```php
+public function getSequenceConfig(): array
+{
+    return [
+        'number' => [
+            'module' => 'invoice',
+            'type_code' => 'INV',
+            'format_template' => 'INV-{YYYY}-{seq:5}',
+            
+            // Starting value (default 1)
+            'start_value' => 1000, 
+            
+            // Custom increment step (default 1)
+            'step' => 2, 
+            
+            // Maximum sequence limit (throws SequenceExhaustedException if exceeded)
+            'max_value' => 99999, 
+            
+            // Set to false to throw a validation exception on manual input overrides
+            'allow_manual' => false, 
+            
+            // Enable continuous sequence recycling (deleted numbers are recycled and reused)
+            'continuous' => true, 
+            
+            // Database connection override for this specific sequence
+            'connection' => 'custom_connection', 
+        ]
+    ];
+}
+```
+
+#### 7. Manual Sequence Facade Generation
+
+To manually query, increment, or recycle sequences in service classes, jobs, or custom commands:
 
 ```php
 use MadeByClowd\Sequenceable\Facades\Sequence;
 
 // Fetch and increment next sequence value
-$number = Sequence::generate('order', 'SO', '202606', '{type_code}-{YYYY}-{MM}-{seq:5}', 5, 'tenant_1');
+$number = Sequence::generate(
+    'order', 
+    'SO', 
+    '202606', 
+    '{type_code}-{YYYY}-{seq:5}', 
+    5, 
+    'tenant_1',
+    null,      // $model context
+    null,      // $connection override
+    1,         // $startValue
+    1,         // $step
+    false,     // $continuous
+    99999      // $maxValue
+);
+
+// Manually recycle a number back into the continuous queue
+Sequence::recycle('order', 'SO', '202606', 'tenant_1', 105);
 
 // Get the current number without incrementing
 $current = Sequence::getCurrent('order', 'SO', '202606', 'tenant_1');

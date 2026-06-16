@@ -162,16 +162,79 @@ public function getSequenceConfig(): array
 }
 ```
 
+### 6. Closure Format Templates & Nested Relation Placeholders
+Customize your formatting templates dynamically using closures or fetch nested relation attributes using dot-notation:
+
+```php
+'number' => [
+    'module' => 'invoice',
+    'type_code' => 'INV',
+    // 1. Fetching a nested relationship attribute:
+    'format_template' => 'INV-{attribute:branch.company.code}-{seq:5}', 
+    
+    // 2. Closure-based template:
+    'format_template' => function ($model) {
+        return 'INV-' . ($model->is_priority ? 'URGENT' : 'NORMAL') . '-{seq:5}';
+    }
+]
+```
+
+### 7. Advanced Enterprise Features
+For complex ERP/CRM numbering requirements, the following properties are supported directly within the model sequence configuration:
+
+```php
+'number' => [
+    'module' => 'invoice',
+    'type_code' => 'INV',
+    'format_template' => '{type_code}-{seq:5}',
+    
+    // Set a custom starting value (defaults to 1)
+    'start_value' => 1000, 
+    
+    // Set a custom increment step size (defaults to 1)
+    'step' => 2, 
+    
+    // Set a maximum limit. Throws a SequenceExhaustedException if exceeded
+    'max_value' => 99999, 
+    
+    // Enforce sequence integrity. Throws a SequenceableException if a manual value is set before saving
+    'allow_manual' => false, 
+    
+    // Enable D365 continuous sequence (recycles deleted numbers automatically)
+    'continuous' => true,
+    
+    // Database connection override for this specific sequence
+    'connection' => 'tenant_db_connection', 
+]
+```
+
 ---
 
 ## Manual Generation (Facade)
 
 Inject sequence values programmatically (e.g. in custom jobs, observers, or seeds):
 
-```use MadeByClowd\Sequenceable\Facades\Sequence;
+```php
+use MadeByClowd\Sequenceable\Facades\Sequence;
 
-// Fetch and increment next sequence value
-$number = Sequence::generate('order', 'SO', '202606', '{type_code}-{YYYY}-{seq:5}', 5, 'tenant_1');
+// Fetch and increment next sequence value (with optional connection, start value, step, continuous, max value)
+$number = Sequence::generate(
+    'order', 
+    'SO', 
+    '202606', 
+    '{type_code}-{YYYY}-{seq:5}', 
+    5, 
+    'tenant_1',
+    null,       // $model (optional)
+    null,       // $connection (optional override)
+    1,          // $startValue (optional, default 1)
+    1,          // $step (optional, default 1)
+    false,      // $continuous (optional, default false)
+    99999       // $maxValue (optional, default null)
+);
+
+// Recycle a sequence number manually (inserts it back into sequence_recycled table)
+Sequence::recycle('order', 'SO', '202606', 'tenant_1', 105);
 
 // Get current value without incrementing
 $current = Sequence::getCurrent('order', 'SO', '202606', 'tenant_1');
@@ -214,6 +277,7 @@ Publishing configuration gives you full architectural control:
 ```php
 return [
     'table' => 'sequences',
+    'recycled_table' => 'sequence_recycled',
     'connection' => null,
 
     // Concurrency Locking Strategy
@@ -241,6 +305,7 @@ return [
         'user_model' => 'App\Models\User',
         'created_by_column' => 'created_by',
         'updated_by_column' => 'updated_by',
+        'user_id_type' => 'bigInteger', // Options: 'bigInteger', 'uuid', 'ulid', 'string'
     ],
 ];
 ```

@@ -13,6 +13,16 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Database Recycled Table Name
+    |--------------------------------------------------------------------------
+    |
+    | Define the database table where recycled sequence numbers are stored.
+    |
+    */
+    'recycled_table' => 'sequence_recycled',
+
+    /*
+    |--------------------------------------------------------------------------
     | Database Connection
     |--------------------------------------------------------------------------
     |
@@ -86,11 +96,14 @@ return [
     | If enabled, migrations will include created_by and updated_by columns,
     | and the sequence manager will populate them with the authenticated user ID.
     |
+    | Supported user_id_types: 'bigInteger', 'uuid', 'ulid', 'string'
+    |
     */
     'audit' => [
         'enabled' => false,
         'user_model' => 'App\Models\User',
         'created_by_column' => 'created_by',
         'updated_by_column' => 'updated_by',
+        'user_id_type' => 'bigInteger',
     ],
 ];

@@ -32,14 +32,32 @@ return new class extends Migration
             if (config('sequenceable.audit.enabled', false)) {
                 $createdBy = config('sequenceable.audit.created_by_column', 'created_by');
                 $updatedBy = config('sequenceable.audit.updated_by_column', 'updated_by');
-                $table->unsignedBigInteger($createdBy)->nullable();
-                $table->unsignedBigInteger($updatedBy)->nullable();
+                $idType = config('sequenceable.audit.user_id_type', 'bigInteger');
+
+                switch ($idType) {
+                    case 'uuid':
+                        $table->uuid($createdBy)->nullable();
+                        $table->uuid($updatedBy)->nullable();
+                        break;
+                    case 'ulid':
+                        $table->ulid($createdBy)->nullable();
+                        $table->ulid($updatedBy)->nullable();
+                        break;
+                    case 'string':
+                        $table->string($createdBy)->nullable();
+                        $table->string($updatedBy)->nullable();
+                        break;
+                    case 'bigInteger':
+                    default:
+                        $table->unsignedBigInteger($createdBy)->nullable();
+                        $table->unsignedBigInteger($updatedBy)->nullable();
+                        break;
+                }
             }
 
             $table->timestamps();
 
             $table->primary(['module', 'type_code', 'period', 'scope']);
-            $table->index(['module', 'type_code', 'period', 'scope']);
         });
     }
 

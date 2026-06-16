@@ -3,9 +3,8 @@
 namespace MadeByClowd\Sequenceable;
 
 use Closure;
-use DateTimeInterface;
+use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -21,26 +20,96 @@ class SequenceManager
      * @param  string  $module  Domain or entity area (e.g., 'invoice')
      * @param  string  $typeCode  Sub-type code (e.g., 'INV')
      * @param  string|null  $period  Reset period identifier (e.g., '202606' or resolved dynamically)
-     * @param  string|null  $formatTemplate  The template format to use
+     * @param  mixed  $formatTemplate  The template format string or Closure
      * @param  int  $padLength  Zero padding length (default 5)
      * @param  string  $scope  Multi-tenancy or organizational scope (default 'default')
      * @param  Model|null  $model  Optional Eloquent model context for dynamic attributes
+     * @param  string|null  $connection  Optional database connection override
+     * @param  int  $startValue  Starting number value (default 1)
+     * @param  int  $step  Increment step size (default 1)
+     * @param  bool  $continuous  Whether to enable continuous sequence recycling
+     * @param  int|null  $maxValue  Optional maximum limit
      */
     public function generate(
         string $module,
         string $typeCode,
         ?string $period = null,
-        ?string $formatTemplate = null,
+        mixed $formatTemplate = null,
         int $padLength = 5,
         string $scope = 'default',
-        ?Model $model = null
+        ?Model $model = null,
+        ?string $connection = null,
+        int $startValue = 1,
+        int $step = 1,
+        bool $continuous = false,
+        ?int $maxValue = null
     ): string {
-        $period = $period ?? now()->format('Ym');
+        if ($padLength < 1) {
+            throw new Exceptions\SequenceableException("Sequence config 'pad_length' must be a positive integer greater than 0.");
+        }
+        if ($startValue < 0) {
+            throw new Exceptions\SequenceableException("Sequence config 'start_value' must be greater than or equal to 0.");
+        }
+        if ($step < 1) {
+            throw new Exceptions\SequenceableException("Sequence config 'step' must be a positive integer greater than 0.");
+        }
 
-        if (config('sequenceable.pre_allocation.enabled', false)) {
-            $nextNumber = $this->generateViaPreAllocation($module, $typeCode, $period, $scope, $formatTemplate);
+        $period = $period ?? now()->format('Ym');
+        $resolvedConnection = $this->resolveConnectionName($connection);
+
+        // Resolve format template if it's a closure
+        if ($formatTemplate instanceof Closure) {
+            $formatTemplate = $formatTemplate($model);
+        }
+
+        // 1. Continuous Sequence (Gap Recycling) Check
+        if ($continuous) {
+            $recycledNumber = $this->claimRecycledNumber($resolvedConnection, $module, $typeCode, $period, $scope);
+            if ($recycledNumber !== null) {
+                if ($maxValue !== null && $recycledNumber > $maxValue) {
+                    throw new Exceptions\SequenceableException("Sequence [{$module}][{$typeCode}] has exceeded its maximum limit of {$maxValue}.");
+                }
+
+                return $this->formatNumber(
+                    $module,
+                    $typeCode,
+                    $period,
+                    $scope,
+                    $recycledNumber,
+                    $formatTemplate,
+                    $padLength,
+                    $model
+                );
+            }
+        }
+
+        // 2. Standard generation
+        if (config('sequenceable.pre_allocation.enabled', false) && ! $continuous) {
+            $nextNumber = $this->generateViaPreAllocation(
+                $resolvedConnection,
+                $module,
+                $typeCode,
+                $period,
+                $scope,
+                $formatTemplate,
+                $startValue,
+                $step
+            );
         } else {
-            $nextNumber = $this->generateViaLocking($module, $typeCode, $period, $scope, $formatTemplate);
+            $nextNumber = $this->generateViaLocking(
+                $resolvedConnection,
+                $module,
+                $typeCode,
+                $period,
+                $scope,
+                $formatTemplate,
+                $startValue,
+                $step
+            );
+        }
+
+        if ($maxValue !== null && $nextNumber['number'] > $maxValue) {
+            throw new Exceptions\SequenceableException("Sequence [{$module}][{$typeCode}] has exceeded its maximum limit of {$maxValue}.");
         }
 
         return $this->formatNumber(
@@ -61,7 +130,7 @@ class SequenceManager
     public function getCurrent(string $module, string $typeCode, ?string $period = null, string $scope = 'default'): int
     {
         $period = $period ?? now()->format('Ym');
-        $connectionName = config('sequenceable.connection');
+        $connectionName = $this->resolveConnectionName();
 
         $sequence = Sequence::on($connectionName)
             ->where('module', $module)
@@ -84,7 +153,7 @@ class SequenceManager
         int $resetTo = 0
     ): void {
         $period = $period ?? now()->format('Ym');
-        $connectionName = config('sequenceable.connection');
+        $connectionName = $this->resolveConnectionName();
         $userId = Auth::id();
 
         // Clear pre-allocation cache if active
@@ -112,49 +181,70 @@ class SequenceManager
             'scope' => $scope,
         ];
 
-        Sequence::on($connectionName)->updateOrCreate(
-            $matchThese,
-            array_merge($matchThese, $attributes, $auditEnabled && $userId ? [$createdByColumn => $userId] : [])
-        );
+        $sequence = Sequence::on($connectionName)
+            ->where('module', $module)
+            ->where('type_code', $typeCode)
+            ->where('period', $period)
+            ->where('scope', $scope)
+            ->first();
+
+        if ($sequence) {
+            $sequence->update(array_merge($attributes, $auditEnabled && $userId ? [$updatedByColumn => $userId] : []));
+        } else {
+            $attributes = array_merge($matchThese, $attributes, $auditEnabled && $userId ? [$createdByColumn => $userId, $updatedByColumn => $userId] : []);
+            $sequence = new Sequence($attributes);
+            $sequence->setConnection($connectionName);
+            $sequence->save();
+        }
     }
 
     /**
      * Generate next number using transactional concurrency locks.
      */
     protected function generateViaLocking(
+        ?string $connectionName,
         string $module,
         string $typeCode,
         string $period,
         string $scope,
-        ?string $formatTemplate
+        ?string $formatTemplate,
+        int $startValue = 1,
+        int $step = 1
     ): array {
         $lockingDriver = config('sequenceable.locking.driver', 'database');
         $timeoutSeconds = config('sequenceable.locking.timeout', 5);
 
         if ($lockingDriver === 'cache') {
-            $lockKey = "sequence_lock:{$module}:{$typeCode}:{$period}:{$scope}";
             $lockStore = config('sequenceable.locking.cache_store');
-            $lock = Cache::store($lockStore)->lock($lockKey, $timeoutSeconds);
+            $store = Cache::store($lockStore);
+            if (! $store->getStore() instanceof LockProvider) {
+                throw new Exceptions\SequenceableException(
+                    "The cache store '".($lockStore ?: config('cache.default'))."' does not support atomic locks. Please configure a compatible store (e.g. redis, database, memcached)."
+                );
+            }
+
+            $lockKey = "sequence_lock:{$module}:{$typeCode}:{$period}:{$scope}";
+            $lock = $store->lock($lockKey, $timeoutSeconds);
 
             try {
-                if (!$lock->block($timeoutSeconds)) {
+                if (! $lock->block($timeoutSeconds)) {
                     throw SequenceLockException::lockAcquisitionFailed("{$module}:{$typeCode}", $timeoutSeconds);
                 }
-                return $this->incrementDatabaseSequence($module, $typeCode, $period, $scope, $formatTemplate, 1);
+
+                return $this->incrementDatabaseSequence($connectionName, $module, $typeCode, $period, $scope, $formatTemplate, $step, $startValue, $step);
             } finally {
                 $lock->release();
             }
         }
 
         // Database locking (Pessimistic) with retry loop
-        $connectionName = config('sequenceable.connection');
         $retryIntervalMs = config('sequenceable.locking.retry_interval', 100);
         $startTime = microtime(true);
 
         while (true) {
             try {
-                return DB::connection($connectionName)->transaction(function () use ($module, $typeCode, $period, $scope, $formatTemplate) {
-                    return $this->incrementDatabaseSequence($module, $typeCode, $period, $scope, $formatTemplate, 1);
+                return DB::connection($connectionName)->transaction(function () use ($connectionName, $module, $typeCode, $period, $scope, $formatTemplate, $step, $startValue) {
+                    return $this->incrementDatabaseSequence($connectionName, $module, $typeCode, $period, $scope, $formatTemplate, $step, $startValue, $step);
                 });
             } catch (\Throwable $e) {
                 if ((microtime(true) - $startTime) >= $timeoutSeconds) {
@@ -169,11 +259,14 @@ class SequenceManager
      * Generate next number using Hi/Lo pre-allocation caching.
      */
     protected function generateViaPreAllocation(
+        ?string $connectionName,
         string $module,
         string $typeCode,
         string $period,
         string $scope,
-        ?string $formatTemplate
+        ?string $formatTemplate,
+        int $startValue = 1,
+        int $step = 1
     ): array {
         $cacheKey = $this->getPreAllocationCacheKey($module, $typeCode, $period, $scope);
         $blockSize = (int) config('sequenceable.pre_allocation.block_size', 50);
@@ -182,8 +275,8 @@ class SequenceManager
         // Fetch current block from cache
         $cached = Cache::get($cacheKey);
 
-        if ($cached && $cached['current'] < $cached['max']) {
-            $newCurrent = $cached['current'] + 1;
+        if ($cached && ($cached['current'] + $step) <= $cached['max']) {
+            $newCurrent = $cached['current'] + $step;
             $cached['current'] = $newCurrent;
             Cache::put($cacheKey, $cached, 86400); // Cache for 24h
 
@@ -194,19 +287,26 @@ class SequenceManager
         }
 
         // Cache empty or exhausted, fetch next block from database
-        $lockKey = "sequence_lock:pre_allocation:{$module}:{$typeCode}:{$period}:{$scope}";
         $lockStore = config('sequenceable.locking.cache_store');
-        $lock = Cache::store($lockStore)->lock($lockKey, $timeoutSeconds);
+        $store = Cache::store($lockStore);
+        if (! $store->getStore() instanceof LockProvider) {
+            throw new Exceptions\SequenceableException(
+                "The cache store '".($lockStore ?: config('cache.default'))."' does not support atomic locks. Please configure a compatible store (e.g. redis, database, memcached)."
+            );
+        }
+
+        $lockKey = "sequence_lock:pre_allocation:{$module}:{$typeCode}:{$period}:{$scope}";
+        $lock = $store->lock($lockKey, $timeoutSeconds);
 
         try {
-            if (!$lock->block($timeoutSeconds)) {
+            if (! $lock->block($timeoutSeconds)) {
                 throw SequenceLockException::lockAcquisitionFailed("{$module}:{$typeCode} (pre-allocation)", $timeoutSeconds);
             }
 
             // Double check cache after acquiring lock
             $cached = Cache::get($cacheKey);
-            if ($cached && $cached['current'] < $cached['max']) {
-                $newCurrent = $cached['current'] + 1;
+            if ($cached && ($cached['current'] + $step) <= $cached['max']) {
+                $newCurrent = $cached['current'] + $step;
                 $cached['current'] = $newCurrent;
                 Cache::put($cacheKey, $cached, 86400);
 
@@ -216,14 +316,14 @@ class SequenceManager
                 ];
             }
 
-            // Increment database by block size
-            $connectionName = config('sequenceable.connection');
-            $dbResult = DB::connection($connectionName)->transaction(function () use ($module, $typeCode, $period, $scope, $formatTemplate, $blockSize) {
-                return $this->incrementDatabaseSequence($module, $typeCode, $period, $scope, $formatTemplate, $blockSize);
+            // Increment database by block size * step
+            $incrementSize = $blockSize * $step;
+            $dbResult = DB::connection($connectionName)->transaction(function () use ($connectionName, $module, $typeCode, $period, $scope, $formatTemplate, $incrementSize, $startValue, $step) {
+                return $this->incrementDatabaseSequence($connectionName, $module, $typeCode, $period, $scope, $formatTemplate, $incrementSize, $startValue, $step);
             });
 
             $max = $dbResult['number'];
-            $current = $max - $blockSize + 1;
+            $current = $max - $incrementSize + $step;
 
             Cache::put($cacheKey, [
                 'current' => $current,
@@ -244,32 +344,36 @@ class SequenceManager
      * Atomically fetch and increment the database sequence record.
      */
     protected function incrementDatabaseSequence(
+        ?string $connectionName,
         string $module,
         string $typeCode,
         string $period,
         string $scope,
         ?string $formatTemplate,
-        int $incrementBy
+        int $incrementBy,
+        int $startValue = 1,
+        int $step = 1
     ): array {
         $userId = Auth::id();
         $auditEnabled = config('sequenceable.audit.enabled', false);
         $createdByColumn = config('sequenceable.audit.created_by_column', 'created_by');
         $updatedByColumn = config('sequenceable.audit.updated_by_column', 'updated_by');
 
-        $sequence = Sequence::where('module', $module)
+        $sequence = Sequence::on($connectionName)
+            ->where('module', $module)
             ->where('type_code', $typeCode)
             ->where('period', $period)
             ->where('scope', $scope)
             ->lockForUpdate()
             ->first();
 
-        if (!$sequence) {
+        if (! $sequence) {
             $attributes = [
                 'module' => $module,
                 'type_code' => $typeCode,
                 'period' => $period,
                 'scope' => $scope,
-                'current_number' => $incrementBy,
+                'current_number' => $startValue + $incrementBy - $step,
                 'format_template' => $formatTemplate,
             ];
 
@@ -278,7 +382,9 @@ class SequenceManager
                 $attributes[$updatedByColumn] = $userId;
             }
 
-            $sequence = Sequence::create($attributes);
+            $sequence = new Sequence($attributes);
+            $sequence->setConnection($connectionName);
+            $sequence->save();
         } else {
             // Update template if provided and different
             if ($formatTemplate && $sequence->format_template !== $formatTemplate) {
@@ -315,7 +421,7 @@ class SequenceManager
     ): string {
         $paddedNumber = str_pad((string) $number, $padLength, '0', STR_PAD_LEFT);
 
-        if (!$template) {
+        if (! $template) {
             // Default fallback pattern: TYPE-PERIOD-PADDEDNUMBER
             return "{$typeCode}-{$period}-{$paddedNumber}";
         }
@@ -366,10 +472,10 @@ class SequenceManager
             return str_pad((string) $number, (int) $matches[2], '0', STR_PAD_LEFT);
         }, $result);
 
-        // Replace model attributes: {attribute:field} or {field:field}
+        // Replace model attributes: {attribute:field} or {field:field} (supports dot notation)
         if ($model) {
-            $result = preg_replace_callback('/\{(attribute|field):([a-zA-Z0-9_]+)\}/', function ($matches) use ($model) {
-                return $model->getAttribute($matches[2]) ?? '';
+            $result = preg_replace_callback('/\{(attribute|field):([a-zA-Z0-9_\.]+)\}/', function ($matches) use ($model) {
+                return data_get($model, $matches[2]) ?? '';
             }, $result);
         }
 
@@ -387,5 +493,109 @@ class SequenceManager
     protected function getPreAllocationCacheKey(string $module, string $typeCode, string $period, string $scope): string
     {
         return "sequenceable_pool:{$module}:{$typeCode}:{$period}:{$scope}";
+    }
+
+    /**
+     * Resolve the database connection name based on transaction mode and overrides.
+     */
+    public function resolveConnectionName(?string $connectionOverride = null): ?string
+    {
+        $connectionName = $connectionOverride ?? config('sequenceable.connection');
+
+        if (config('sequenceable.transaction_mode', 'gapless') === 'gap_tolerant') {
+            $baseConnection = $connectionName ?? config('database.default');
+            $baseConfig = config("database.connections.{$baseConnection}");
+
+            // Fallback for SQLite in-memory database
+            if (isset($baseConfig['driver']) && $baseConfig['driver'] === 'sqlite' && ($baseConfig['database'] === ':memory:' || $baseConfig['database'] === '')) {
+                return $connectionName;
+            }
+
+            $isolatedConnectionName = "sequenceable_isolated_{$baseConnection}";
+
+            if (! config()->has("database.connections.{$isolatedConnectionName}")) {
+                if ($baseConfig) {
+                    config(["database.connections.{$isolatedConnectionName}" => $baseConfig]);
+                }
+            }
+
+            return $isolatedConnectionName;
+        }
+
+        return $connectionName;
+    }
+
+    /**
+     * Claim the oldest recycled number for a sequence partition.
+     */
+    protected function claimRecycledNumber(
+        ?string $connectionName,
+        string $module,
+        string $typeCode,
+        string $period,
+        string $scope
+    ): ?int {
+        $recycledTable = config('sequenceable.recycled_table', 'sequence_recycled');
+
+        return DB::connection($connectionName)->transaction(function () use ($connectionName, $recycledTable, $module, $typeCode, $period, $scope) {
+            $record = DB::connection($connectionName)
+                ->table($recycledTable)
+                ->where('module', $module)
+                ->where('type_code', $typeCode)
+                ->where('period', $period)
+                ->where('scope', $scope)
+                ->orderBy('number', 'asc')
+                ->lockForUpdate()
+                ->first();
+
+            if ($record) {
+                DB::connection($connectionName)
+                    ->table($recycledTable)
+                    ->where('id', $record->id)
+                    ->delete();
+
+                return (int) $record->number;
+            }
+
+            return null;
+        });
+    }
+
+    /**
+     * Recycle a sequence number (inserts it back into sequence_recycled table).
+     */
+    public function recycle(
+        string $module,
+        string $typeCode,
+        string $period,
+        string $scope,
+        int $number,
+        ?string $connection = null
+    ): void {
+        $resolvedConnection = $this->resolveConnectionName($connection);
+        $recycledTable = config('sequenceable.recycled_table', 'sequence_recycled');
+
+        // Prevent duplicates in the recycled queue
+        $exists = DB::connection($resolvedConnection)
+            ->table($recycledTable)
+            ->where('module', $module)
+            ->where('type_code', $typeCode)
+            ->where('period', $period)
+            ->where('scope', $scope)
+            ->where('number', $number)
+            ->exists();
+
+        if (! $exists) {
+            DB::connection($resolvedConnection)
+                ->table($recycledTable)
+                ->insert([
+                    'module' => $module,
+                    'type_code' => $typeCode,
+                    'period' => $period,
+                    'scope' => $scope,
+                    'number' => $number,
+                    'created_at' => now(),
+                ]);
+        }
     }
 }
