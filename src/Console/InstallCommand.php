@@ -22,14 +22,14 @@ class InstallCommand extends Command
      *
      * @var string
      */
-    protected $description = 'Set up the Laravel Sequenceable package (publish assets and migrate)';
+    protected $description = 'Set up the Laravel Auto Sequence package (publish assets and migrate)';
 
     /**
      * Execute the console command.
      */
     public function handle(): int
     {
-        $this->components->info('Setting up Laravel Sequenceable package...');
+        $this->components->info('Setting up Laravel Auto Sequence package...');
 
         $hasExplicitOptions = $this->option('publish-config') ||
             $this->option('publish-migrations') ||
@@ -65,7 +65,7 @@ class InstallCommand extends Command
         }
 
         // 3. Publish AI Agent Skills
-        $publishSkills = $this->option('publish-skills') || (! $hasExplicitOptions && $this->confirm('Do you want to publish Sequenceable AI Agent skills for your workspace?', true));
+        $publishSkills = $this->option('publish-skills') || (! $hasExplicitOptions && $this->confirm('Do you want to publish Auto Sequence AI Agent skills for your workspace?', true));
         if ($publishSkills) {
             $exit = $this->call('vendor:publish', [
                 '--tag' => 'auto-sequence-boost-skills',
@@ -90,7 +90,7 @@ class InstallCommand extends Command
             $this->components->info('Database migrations completed.');
         }
 
-        $this->components->info('Laravel Sequenceable package setup finished!');
+        $this->components->info('Laravel Auto Sequence package setup finished!');
 
         return self::SUCCESS;
     }

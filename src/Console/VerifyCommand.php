@@ -53,7 +53,7 @@ class VerifyCommand extends Command
         }
 
         if (! is_subclass_of($modelClass, Sequenceable::class)) {
-            $this->components->error("Model class '{$modelClass}' must implement 'MadeByClowd\\Sequenceable\\Contracts\\Sequenceable' interface.");
+            $this->components->error("Model class '{$modelClass}' must implement 'MadeByClowd\\AutoSequence\\Contracts\\Sequenceable' interface.");
 
             return self::FAILURE;
         }
